@@ -4,6 +4,7 @@
  */
 
 import React from 'react';
+import SparkMD5 from 'spark-md5';
 import {Breadcrumb, Button, Col, Form, Input, message, Radio, Row, Select, Upload} from 'antd';
 import {config, prefix} from '../utils/config';
 import {callApi} from '../utils/fetchApi';
@@ -25,33 +26,83 @@ class AddAlgorithm extends React.Component {
             fileList: [],
             loading: false
         };
-        this.handleMarkdownChange = this.handleMarkdownChange.bind(this);
+        this.chunkSize = 2 * 1024 * 1024;
+    }
+
+
+    hasFile = file => {
+        console.log(this);
+        return new Promise((resolve, reject) => {
+            const chunks = Math.ceil(file.size / this.chunkSize);
+            let currentChunk = 0;
+            const spark = new SparkMD5.ArrayBuffer();
+            const fileReader = new FileReader();
+            const loadNext = () => {
+                const start = this.chunkSize * currentChunk;
+                const end = Math.min(file.size, start + this.chunkSize);
+                fileReader.readAsArrayBuffer(file.slice(start, end));
+            }
+            fileReader.onload = e => {
+                spark.append(e.target.result);
+                currentChunk ++;
+                if (currentChunk < chunks) {
+                    loadNext();
+                } else {
+                    console.log('finish loading');
+                    const result = spark.end();
+                    const sparkMD5  = new SparkMD5();
+                    sparkMD5.append(result);
+                    sparkMD5.append(file.name);
+                    const hexHash = sparkMD5.end();
+                    resolve(hexHash);
+                }
+            }
+            fileReader.onerror = () => {
+                console.warn('文件读取失败');
+            }
+            loadNext();
+        })
     }
 
     handleSubmit = (e, isSave) => {
         e.preventDefault();
-        this.props.form.validateFields((err, values) => {
+        this.props.form.validateFields(async (err, values) => {
             if (!err) {
+                this.setState({loading: true});
                 const {fileList} = this.state;
                 const {name} = values;
-                const formData = new FormData();
-                fileList.forEach(file => {
-                    formData.append('pluginFile', file);
-                });
-                const algorithm = {
-                    algorithmName: name,
-                    description: this.state.markdownSrc
-                };
-                this.setState({loading: true});
-         
-                formData.append(
-                    'algorithm',
-                    new Blob([JSON.stringify(algorithm)], {
-                        type: 'application/json'
-                    })
-                );
-                callApi('post', `${prefix}/algorithm`, '', formData).then(res => {
+                console.log(fileList[0]);
+                const file = fileList[0];
+                const promiseList = [];
+                const chunkSize = 4 * 1024 * 1024;
+                const chunkCount = Math.ceil(file.size / chunkSize);
+                const hash = await this.hasFile(file);
+                const reqList = [];
+                for (let i = 0; i < chunkCount; i++) {
+                    reqList[i] = {};
+                    const start = i * chunkSize;
+                    const end = Math.min(file.size, start + chunkSize);
+                    const formData = new FormData();
+                    formData.append('file', file.slice(start, end));
+                    formData.append('name', file.name);
+                    formData.append('total', chunkCount);
+                    formData.append('size', file.size);
+                    formData.append('index', i);
+                    formData.append('hash', hash);
+                    promiseList.push(callApi('post', `${prefix}/upload`, '', formData, reqList[i]));
+                }
+                Promise.all(promiseList).then(res => {
+                    console.log(res);
                     this.setState({loading: false});
+                    const data = {
+                        size: file.size,
+                        name: file.name,
+                        total: chunkCount,
+                        hash
+                    };
+                    callApi('post', `${prefix}/merge_chunks`, '', data).then(res => {
+                        alert('上传成功');
+                    })
                 });
             }
         });
@@ -64,11 +115,6 @@ class AddAlgorithm extends React.Component {
         const file = e && e.fileList.slice(-1);
         return file;
     };
-
-
-    handleMarkdownChange(editor) {
-        this.setState({markdownSrc: editor.getValue()});
-    }
 
     render() {
         const {getFieldDecorator} = this.props.form;
